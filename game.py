@@ -9,6 +9,12 @@ import math
 from collections import deque  # 双端队列数据结构
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CHEAT = 1
+LEVEL_1 =0.8
+LEVEL_2 =0.4
+LEVEL_3 =0.28
+LEVEL_4 =0.12
+
 def resource_path(relative_path):
     try:
         base_path = sys._MEIPASS
@@ -25,17 +31,37 @@ class AudioAnalyzer:
         
         # STEP 2: 动态选择采样率
         if self.duration > 300:  # 超过5分钟（300秒）
-            sr = None           # 保留原始采样率
+            sr = 44100           # 保留原始采样率
             print("警告：长音频启用原始采样率模式")
         else:
             sr = 44100          # 短音频使用标准采样率
         
         # STEP 3: 加载音频（根据时长选择不同模式）
         self.y, self.sr = librosa.load(file_path, sr=sr)
+        
+        avg_db = self.get_average_db()
+        print(f"整首歌的平均分贝为：{avg_db:.2f} dB")
+        
         # 预计算静音区间
-        self.silence_intervals = self.detect_silence()
+        self.silence_intervals = self.detect_silence(avg_db, min_silence_duration=0.1)
 
-    def detect_silence(self, threshold_db=-15, min_silence_duration=0.2):
+    def get_average_db(self):
+        """
+        计算整首歌的平均分贝值
+        返回：
+            avg_db (float): 平均分贝值
+        """
+        # STEP 1: 计算整体RMS能量
+        rms = librosa.feature.rms(y=self.y)[0]  # 提取所有帧的RMS能量
+        
+        # STEP 2: 转换为分贝
+        db_values = librosa.amplitude_to_db(rms)
+        
+        # STEP 3: 取平均值
+        avg_db = np.mean(db_values)
+
+        return avg_db
+    def detect_silence(self, threshold_db, min_silence_duration):
         """
         检测静音区间
         参数：
@@ -69,55 +95,66 @@ class AudioAnalyzer:
         """检查时间点是否位于静音区间"""
         return any(start < t < end for (start, end) in self.silence_intervals)
 
-    def extract_features(self):
+    def extract_features(self,level):
         """智能特征提取，集成能量过滤和节拍修正"""
         # 计算RMS能量（每帧的均方根能量）
-        rms = librosa.feature.rms(y=self.y, frame_length=128, hop_length=16)[0]
+        #rms = librosa.feature.rms(y=self.y, frame_length=128, hop_length=16)[0]
+        #rms = librosa.util.normalize(rms)
         
-        # 三级阈值
-        strong_threshold = np.percentile(rms, 80)  # 强音头阈值
-        medium_threshold = np.percentile(rms, 35)  # 中音头阈值
-        weak_threshold = np.percentile(rms, 1)   # 弱音头阈值 
-    
+        self.level = level
         
         onset_env = librosa.onset.onset_strength(
             y=self.y, 
             sr=self.sr,
             hop_length=16,
-            aggregate=np.median  # 使用中位数聚合
+            aggregate=np.mean  # 使用平均数聚合
         )
         
-        onset_env = onset_env / np.max(onset_env)
+        #onset_env = librosa.util.normalize(onset_env)
+        # 三级阈值
+        strong_threshold = np.percentile(onset_env, 99)  # 强音头阈值
+        medium_threshold = np.percentile(onset_env, 95)  # 中音头阈值
+        weak_threshold = np.percentile(onset_env, 10)   # 弱音头阈值 
     
         # 应用三级阈值
-        onset_env_strong = (onset_env >= strong_threshold).astype(float) * 0.25  # 强音头权重更高
-        onset_env_medium = ((onset_env >= medium_threshold) & (onset_env < strong_threshold)).astype(float) * 0.4  # 中音头权重适中
-        onset_env_weak = ((onset_env >= weak_threshold) & (onset_env < medium_threshold)).astype(float) * 0.75  # 弱音头权重较低
-        onset_env_final = onset_env_strong + onset_env_medium + onset_env_weak
+        onset_env_strong = (onset_env >= strong_threshold).astype(float) * 0.9  # 强音头权重更高
+        onset_env_medium = ((onset_env >= medium_threshold) & (onset_env < strong_threshold)).astype(float) * 0.7  # 中音头权重适中
+        onset_env_weak = ((onset_env >= weak_threshold) & (onset_env < medium_threshold)).astype(float) * 0.2  # 弱音头权重较低
+        onset_env_final = onset_env_strong + onset_env_medium + onset_env_weak+ onset_env
         onset_env_final = librosa.util.normalize(onset_env_final)
-        
-        # 节拍检测（使用修正版算法）
-        tempo, beat_frames = librosa.beat.beat_track(
-            y=self.y, sr=self.sr,
-            units='frames',
-            tightness=0.00000000001  # 提高节拍间隔一致性
-        )
-        beat_times = librosa.frames_to_time(beat_frames, sr=self.sr)
-
-        
+        #with open("look_debug.txt", "w") as f:
+            #f.write(str(onset_env_final.tolist()))
         # 音头检测（带能量过滤）
         onset_frames = librosa.onset.onset_detect(
             onset_envelope=onset_env_final,  # 特征包络线
             sr=self.sr,                     # 采样率
             units='frames',                 # 返回单位
-            pre_max=1,                      # 前向最大检测窗口
-            post_max=1,                     # 后向最大检测窗口
-            pre_avg=1,                      # 前向平均窗口
-            post_avg=1,                     # 后向平均窗口
-            delta=0.00000000001,                     # 差异阈值
-            wait=0                          # 最小间隔帧数
+            pre_max=552*(self.level*2.5),                      # 前向最大检测窗口
+            post_max=552*(self.level*2.5),                     # 后向最大检测窗口
+            pre_avg=3312*(self.level*2.5),                      # 前向平均窗口
+            post_avg=3312*(self.level*2.5),                     # 后向平均窗口
+            delta=self.level*0.25,                     # 差异阈值
+            wait=138*(self.level*2.5)                          # 最小间隔帧数
         )
-        onset_times = librosa.frames_to_time(onset_frames, sr=self.sr)
+        
+        # 节拍检测（使用修正版算法）
+        tempo, beat_frames = librosa.beat.beat_track(
+            y=self.y, sr=self.sr,
+            units='frames',
+            hop_length=512,
+            tightness=0.00000001  # 节拍间隔一致性
+        )
+        beat_times = librosa.frames_to_time(
+            beat_frames, 
+            sr=self.sr,
+            hop_length=512
+        )
+
+        onset_times = librosa.frames_to_time(
+            onset_frames,
+            sr=self.sr,
+            hop_length=16  # 必须与 onset_strength 中使用的 hop_length 一致！
+        )
         
         # 合并事件并过滤静音区
         all_events = np.union1d(beat_times, onset_times)
@@ -125,8 +162,9 @@ class AudioAnalyzer:
         
         # 时间点密度控制（防止过密）
         base_interval = 60 / tempo
-        min_interval = base_interval * 0.06
-        return self._filter_dense_events(filtered_events, min_interval), tempo
+        print(tempo)
+        min_interval = base_interval * self.level *  0.75
+        return self._filter_dense_events(filtered_events, min_interval), tempo, onset_env_strong, onset_env_medium, self.sr
 
     def _filter_dense_events(self, events, min_interval):
         """事件密度控制，确保最小时间间隔"""
@@ -148,16 +186,17 @@ class Note(pygame.sprite.Sprite):
         """
         参数：
         lane: 轨道编号（0-3）
-        note_type: 音符类型（tap/click点击型，hold长按型）
+        note_type: 音符类型（tap/click点击型，strong强型）
         speed: 下落速度（像素/帧）
         spawn_time: 生成时间戳（毫秒）
         """
         super().__init__()
         self.fix=0
+        self.hold_kill = False
         self.lane = lane
         self.note_type = note_type  # 记录音符类型
-        colors = {"tap": (0,255,0), "hold": (255,0,0)}  # 不同类型颜色定义
-        height = 30 if note_type == "hold" else 30  # 长按型高度较小
+        colors = {"weak": (0,200,255), "medium": (0,255,0), "strong": (255,0,0)}  # 不同类型颜色定义
+        height = 30 if note_type == "strong" else 30  # 长按型高度较小
         
         # 创建音符表面对象
         self.image = pygame.Surface((self.NOTE_WIDTH-40, height))
@@ -258,6 +297,7 @@ class Particle(pygame.sprite.Sprite):
 class RhythmGame:
     """节奏游戏主控制器"""
     def __init__(self, audio_path):
+        pygame.mixer.pre_init(44100, -16, 2, 1024,allowedchanges=0)
         pygame.init()  # 初始化Pygame
         self.screen = pygame.display.set_mode((1280, 720))  # 创建1280x720窗口
         pygame.display.set_caption("This is true music")  # 设置窗口标题
@@ -272,7 +312,7 @@ class RhythmGame:
             """加载游戏资源"""
             self.notes = pygame.sprite.Group()  # 创建音符精灵组
             self.font = pygame.font.Font(None, 46)  # 创建字体对象（默认字体，36号）
-            self.bgm=pygame.mixer.Sound(resource_path("bili_music.mp3"))  # 加载背景音乐
+            pygame.mixer.music.load(resource_path("bili_music.mp3"))  # 加载背景音乐
             # 加载并处理背景图片
             self.background = pygame.image.load(resource_path("bili_cover.jpg")).convert()
             self.background = pygame.transform.scale(self.background, (1280, 720))
@@ -280,16 +320,58 @@ class RhythmGame:
             
     def show_loading_screen(self):
         """显示加载界面"""
+        self.wait_for_game_level()
+        self.screen.fill((0, 0, 0))
         self.screen.blit(self.background, (0, 0))  # 绘制背景
-        self.draw_centered_text('等待音频分析...别乱动...a s j k为按键...若未响应，等结束后按空格开始')  # 居中显示加载文本
+        self.draw_centered_text('等待音频分析...a s j k为按键...若未响应，等恢复后按空格开始')  # 居中显示加载文本
         pygame.display.flip()  # 更新显示            
+    def wait_for_game_level(self):
+        """等待玩家设置难度"""
+        self.screen.fill((0, 0, 0))  # 清屏为黑色
+        self.screen.blit(self.background, (0, 0))  # 绘制半透明背景
+        self.draw_centered_text('1休闲，2标准，3挑战，4终极')  # 显示提示文字
+        pygame.display.flip()  # 更新显示
         
+        start = False
+        while not start:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:  # 处理退出事件
+                    self.quit_game()
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_1:
+                        self.level = LEVEL_1
+                        start = True  
+                    elif event.key == pygame.K_2:
+                        self.level = LEVEL_2
+                        start = True  
+                    elif event.key == pygame.K_3:
+                        self.level = LEVEL_3
+                        start = True  
+                    elif event.key == pygame.K_4:
+                        self.level = LEVEL_4
+                        start = True 
+         
     def setup_game_parameters(self, audio_path):
         """配置核心游戏参数"""
         self.analyzer = AudioAnalyzer(audio_path)  # 创建音频分析器
         # 获取音符生成时间点和音乐速度
-        self.note_times, self.tempo = self.analyzer.extract_features()
+        self.note_times, self.tempo, self.strongs, self.mediums, self.sr= self.analyzer.extract_features(self.level)
+        #with open("look_debug.txt", "w") as f:
+            #f.write(str(self.note_times))
+        # 在生成音符事件时记录强度等级
+        self.levels = []
+        for t in self.note_times:
+            frame = librosa.time_to_frames(t, sr=self.sr, hop_length=16)
+            if self.strongs[frame] > 0:
+                strength = "strong"
+            elif self.mediums[frame] > 0:
+                strength = "medium"
+            else:
+                strength = "weak"
+            self.levels.append(strength)
         
+        self.note_times *= 1 - ((self.tempo/120.0)/20000 )
+            
         # 动态速度调整（基于BPM）
         self.base_speed = 8  # 基准速度（120BPM对应的速度）
         # 修改原线性增速为指数缓增
@@ -304,10 +386,21 @@ class RhythmGame:
         
         self.perfect = 150  # 完美判定阈值（±50ms）
         self.good = 300    # 良好判定阈值（±100ms）
-        self.miss =100
+        self.miss =80
         
         self.fix_times=0
         self.fix_time=0
+        self.fix_time_debug=0
+        self.last_fix_time=0
+        self.fix_ok  = False
+        
+        self.note_count = 0
+        
+        self.last_note_type = 0
+        self.last_note_lane = 0
+        self.last_note_time = 0
+        self.last_note_lane2  = 0
+        self.lock=0
         
         # 输入映射配置
         self.keys = [pygame.K_a, pygame.K_s, pygame.K_j, pygame.K_k]  # 可用按键
@@ -341,7 +434,7 @@ class RhythmGame:
     def start_game_loop(self):
         """游戏主循环"""
         active_notes = deque(self.generate_notes())  # 创建音符队列
-        self.bgm.play()  # 开始播放音乐
+        pygame.mixer.music.play()  # 开始播放音乐
         self.start_time = pygame.time.get_ticks()  # 记录游戏开始时间
         
         running = True
@@ -356,24 +449,47 @@ class RhythmGame:
             
     def generate_notes(self):
         """生成音符数据队列"""
-        note_types = ["tap"] * 7 + ["hold"]  # 音符类型概率分布（5:1）
+        #note_types = ["tap"] * 10 + ["strong"]  # 音符类型概率分布（5:1）
         lanes = [0, 1, 2, 3]  # 可用轨道
         # 创建音符数据列表（时间单位转换为毫秒）
         return sorted([
             {
-                "time": (t * 1000)-(620/self.speed)*(1000/60)+2000,  # 转换为毫秒
-                "lane": random.choice(lanes),  # 随机分配轨道
-                "type": random.choice(note_types)  # 随机选择类型
-            } for t in self.note_times
-        ], key=lambda x: x["time"])  # 按时间排序
+                "time": (t * 1000) - (620 / self.speed) * (1000 / 60) + 4000,
+                "lane": random.choice(lanes),
+                "type": self.levels[i]  # 按索引取对应 type
+            } for i, t in enumerate(self.note_times)
+        ], key=lambda x: x["time"])
 
     def spawn_notes(self, active_notes, current_time):
             """根据时间生成新音符"""
-            # 生成未来2秒内需要出现的音符
+            # 生成未来3秒内需要出现的音符
             lanes = [0, 1, 2, 3]
-            while active_notes and active_notes[0]["time"] <= current_time + 2000:
+            while active_notes and active_notes[0]["time"] <= current_time + 4000 + self.fix_time:
                 note_data = active_notes.popleft()  # 从队列取出音符数据
                 spawn_time = pygame.time.get_ticks()  # 记录实际生成时间
+                #copy=0
+                if note_data["type"]=="weak" :
+                    note_data["lane"]=self.last_note_lane
+                    #copy=1
+                    if self.last_note_type == "strong" or self.lock==1:   
+                        new_note = Note(
+                            self.last_note_lane2,
+                            note_data["type"], 
+                            self.speed,
+                            spawn_time
+                        )
+                        self.notes.add(new_note)
+                        self.full+=300
+                        self.lock=1
+                        
+                if note_data["type"]!="weak" and self.last_note_type == "weak":   
+                    if self.last_note_lane in lanes:
+                        lanes.remove(self.last_note_lane)
+                    if self.lock==1:
+                        if self.last_note_lane2 in lanes:
+                            lanes.remove(self.last_note_lane2)
+                    note_data["lane"]=random.choice(lanes)
+                    self.lock=0
                 # 创建Note对象并加入精灵组
                 new_note = Note(
                     note_data["lane"], 
@@ -381,9 +497,21 @@ class RhythmGame:
                     self.speed,
                     spawn_time
                 )
+                '''
+                if  copy==1:
+                    new_note = Note(
+                        note_data["lane"], 
+                        note_data["type"], 
+                        self.speed,
+                        (spawn_time + self.last_note_time)/2.0 - spawn_time + self.last_note_time
+                    )
+                    self.notes.add(new_note)
+                '''
                 self.notes.add(new_note)
-                if note_data["type"]=="hold":
-                    lanes.remove(note_data["lane"])
+                if note_data["type"]=="strong":
+                    self.last_note_lane2 = note_data["lane"]
+                    if note_data["lane"] in lanes:
+                        lanes.remove(note_data["lane"])
                     note_data["lane"]=random.choice(lanes)
                     new_note = Note(
                         note_data["lane"], 
@@ -394,6 +522,10 @@ class RhythmGame:
                     self.notes.add(new_note)
                     self.full+=300
                 self.full+=300
+                self.last_note_type  = note_data["type"]
+                self.last_note_lane = note_data["lane"]
+                #self.last_note_time = spawn_time
+                
     def handle_events(self):
         """处理系统事件"""
         for event in pygame.event.get():
@@ -414,14 +546,14 @@ class RhythmGame:
             # 遍历所有音符检测命中
             for note in self.notes:
                 # 新增轨道匹配检查
-                if note.lane != lane:
+                if note.lane != lane :
                     continue
                 
                 # 修正时间差计算（使用绝对时间）
-                if self.fix_times==11:
-                    time_diff = abs(current_time - note.expected_time + self.fix_time)
-                else:
-                    time_diff = abs(current_time - note.expected_time)
+                #if self.fix_ok == True:
+                time_diff = abs(current_time - note.expected_time )
+                #else:
+                    #time_diff = abs(current_time - note.expected_time)
                 # 新增有效性检查（音符未过期）
                 if time_diff > (self.good+self.miss):  # 音符过早出现
                     continue
@@ -463,19 +595,47 @@ class RhythmGame:
     def note_down(self):
         if self.fix_times <10:
             for note in self.notes:
-                if note.rect.top > 585 and note.fix==0:
+                if note.rect.top > 285 and note.fix==0:
                     note.fix=1
                     exp=note.expected_time
-                    fact=pygame.time.get_ticks()
-                    self.fix_time+=(exp-fact)
+                    fact=pygame.time.get_ticks()+(300/self.speed)* (1000/60)
+                    self.fix_time_debug+=(exp-fact)
                     self.fix_times+=1
-        elif self.fix_times==10:
-            self.fix_time=self.fix_time/self.fix_times
-            self.fix_times+=1
+                    #print(self.fix_times)
+                    #print(exp)
+                    #print(fact)
+        elif self.fix_times==10 or self.fix_times==11:
+            self.fix_ok = True
+            self.fix_times+=2
+            if self.fix_ok == True :
+                self.fix_time=self.fix_time_debug/(self.fix_times-2)
+                self.fix_time_debug=0
+                self.last_fix_time = pygame.time.get_ticks()
+                #print(f"修正时间{self.fix_time}")
+                
+        if pygame.time.get_ticks() - self.last_fix_time > 20000 and (self.fix_times==12 or self.fix_times==13):
+            self.fix_times=0
+            #print(pygame.time.get_ticks())
+            #print(pygame.mixer.music.get_pos())
         for note in self.notes:
+            keys = pygame.key.get_pressed()
+            if note.note_type=="weak" and note.rect.top > 500:
+                key_to_check = self.keys[note.lane]  # 获取该音符所在轨道的按键
+                if keys[key_to_check]:  # 判断该按键是否被按下（长按中）
+                    note.hold_kill = True
+                if note.rect.top > 585 and note.hold_kill == True:
+                    self.handle_hit(300, note)
             if note.rect.top > 720:
                 note.kill()
                 self.combo = 0
+                
+            
+            if note.rect.top >  585 and CHEAT ==1 :
+                #print(pygame.time.get_ticks())
+                #print(note.expected_time-pygame.time.get_ticks())
+                #print(self.note_times[self.note_count]-(pygame.time.get_ticks() - self.start_time)/1000)
+                #self.note_count+=1
+                self.handle_hit(300, note)
     def update_game_state(self, current_time):
         """更新游戏每一帧的状态"""
         self.notes.update()  # 更新所有音符位置
